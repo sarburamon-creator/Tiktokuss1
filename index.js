@@ -49,17 +49,25 @@ const commands = [
             opt.setName("username")
                 .setDescription("Noul username")
                 .setRequired(true)
-        )
+        ),
+
+    new SlashCommandBuilder()
+        .setName("check_session")
+        .setDescription("Verifică dacă session ID-ul este valid")
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-    await rest.put(
-        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-        { body: commands }
-    );
-    console.log("✔ Comenzi înregistrate în Discord");
+    try {
+        await rest.put(
+            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+            { body: commands }
+        );
+        console.log("✔ Comenzi înregistrate în Discord");
+    } catch (error) {
+        console.error("❌ Eroare la înregistrarea comenzilor:", error);
+    }
 })();
 
 // ======================================================
@@ -87,24 +95,31 @@ class XG {
         this.debug = debug;
         this.hex_CE0 = [
             0x05, 0x00, 0x50,
-            Math.floor(Math.random() * 255),
+            Math.floor(Math.random() * 256),
             0x47, 0x1e, 0x00,
-            Math.floor(Math.random() * 255) & 0xf0
+            Math.floor(Math.random() * 256) & 0xf0
         ];
     }
 
     addr_BA8() {
+        let arr = Array.from({ length: 256 }, (_, i) => i);
         let tmp = "";
-        let arr = [...Array(256).keys()];
+        
         for (let i = 0; i < 256; i++) {
             let A = i === 0 ? 0 : tmp ? tmp : arr[i - 1];
             let B = this.hex_CE0[i % 8];
-            if (A === 0x05 && i !== 1 && tmp !== 0x05) A = 0;
+            
+            if (A === 0x05 && i !== 1 && tmp !== 0x05) {
+                A = 0;
+            }
+            
             let C = (A + i + B) % 256;
             tmp = C < i ? C : "";
             let D = arr[C];
             arr[i] = D;
+            arr[C] = i;
         }
+        
         return arr;
     }
 
@@ -138,8 +153,8 @@ class XG {
             let D = B ^ C;
             let E = rbit(D);
             let F = E ^ this.length;
-            let G = (~F) >>> 0;
-            debug[i] = parseInt(G.toString(16).slice(-2), 16);
+            let G = (~F) & 0xFF;
+            debug[i] = G;
         }
         return debug;
     }
@@ -173,19 +188,27 @@ function generateGorgon(param, data, cookie) {
         let dataMD5 = crypto.createHash("md5").update(data).digest("hex");
         for (let i = 0; i < 8; i += 2)
             debug.push(parseInt(dataMD5.slice(i, i + 2), 16));
-    } else debug.push(0, 0, 0, 0);
+    } else {
+        debug.push(0, 0, 0, 0);
+    }
 
     if (cookie) {
         let cookieMD5 = crypto.createHash("md5").update(cookie).digest("hex");
         for (let i = 0; i < 8; i += 2)
             debug.push(parseInt(cookieMD5.slice(i, i + 2), 16));
-    } else debug.push(0, 0, 0, 0);
+    } else {
+        debug.push(0, 0, 0, 0);
+    }
 
     debug.push(1, 1, 2, 4);
 
     for (let i = 0; i < 8; i += 2) {
         let x = parseInt(Khronos.slice(i, i + 2), 16);
         debug.push(x);
+    }
+
+    while (debug.length < 0x14) {
+        debug.push(0);
     }
 
     return {
@@ -203,17 +226,30 @@ async function getProfile(session_id, device_id, iid) {
         let param = `device_id=${device_id}&iid=${iid}&id=kaa&version_code=34.0.0&language=en&app_name=lite&app_version=34.0.0&carrier_region=SA&tz_offset=10800&locale=en&sys_region=SA&aid=473824`;
         let url = `https://api16.tiktokv.com/aweme/v1/user/profile/self/?${param}`;
 
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+
         let res = await fetch(url, {
             headers: {
                 "Cookie": `sessionid=${session_id}`,
-                "user-agent": "com.zhiliaoapp.musically/432424234"
-            }
+                "User-Agent": "com.zhiliaoapp.musically/2022701030 (Linux; U; Android 9; en_US; RMX3551; Build/PQ3A.190705.003; Cronet/TTNetVersion:5c5a6994 2022-07-13)",
+                "Accept-Encoding": "gzip, deflate"
+            },
+            signal: controller.signal
         });
+
+        clearTimeout(timeout);
+
+        if (!res.ok) {
+            console.error(`API Error: ${res.status} ${res.statusText}`);
+            return "None";
+        }
 
         let data = await res.json();
         return data.user?.unique_id || "None";
 
     } catch (e) {
+        console.error("Eroare în getProfile:", e.message);
         return "None";
     }
 }
@@ -226,32 +262,72 @@ async function changeUsername(session_id, new_username) {
     let device_id = Math.floor(Math.random() * 9999999999).toString();
     let iid = Math.floor(Math.random() * 9999999999).toString();
 
-    let lastUsername = await getProfile(session_id, device_id, iid);
-
-    let data = `aid=364225&unique_id=${encodeURIComponent(new_username)}`;
-
-    let param = `aid=364225&device_id=${device_id}&iid=${iid}`;
-    let sig = generateGorgon(param, data, "");
-
-    let res = await fetch(
-        `https://api16.tiktokv.com/aweme/v1/commit/user/?${param}`,
-        {
-            method: "POST",
-            headers: {
-                "Cookie": `sessionid=${session_id}`,
-                "User-Agent": "Whee 1.1.0 rv:11005",
-                ...sig
-            },
-            body: data
+    try {
+        console.log("⏳ Obțin username-ul curent...");
+        let lastUsername = await getProfile(session_id, device_id, iid);
+        
+        if (lastUsername === "None") {
+            return "❌ Session ID invalid sau expirat!";
         }
-    );
+        
+        console.log(`Username curent: ${lastUsername}`);
 
-    let text = await res.text();
+        let data = `aid=364225&unique_id=${encodeURIComponent(new_username)}`;
+        let param = `aid=364225&device_id=${device_id}&iid=${iid}`;
+        
+        console.log("⏳ Generez X-Gorgon...");
+        let sig = generateGorgon(param, data, "");
+        console.log(`X-Gorgon: ${sig["X-Gorgon"]}`);
+        console.log(`X-Khronos: ${sig["X-Khronos"]}`);
 
-    let changed = await getProfile(session_id, device_id, iid);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
 
-    if (changed !== lastUsername) return "✔ Username schimbat cu succes!";
-    return "❌ Eroare TikTok:\n" + text;
+        console.log("⏳ Trimit cererea la TikTok...");
+        let res = await fetch(
+            `https://api16.tiktokv.com/aweme/v1/commit/user/?${param}`,
+            {
+                method: "POST",
+                headers: {
+                    "Cookie": `sessionid=${session_id}`,
+                    "User-Agent": "com.zhiliaoapp.musically/2022701030 (Linux; U; Android 9; en_US; RMX3551; Build/PQ3A.190705.003; Cronet/TTNetVersion:5c5a6994 2022-07-13)",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept-Encoding": "gzip, deflate",
+                    ...sig
+                },
+                body: data,
+                signal: controller.signal
+            }
+        );
+
+        clearTimeout(timeout);
+
+        let responseText = await res.text();
+        console.log(`Răspuns TikTok: ${responseText.substring(0, 200)}...`);
+
+        if (!res.ok) {
+            return `❌ Eroare HTTP ${res.status}: ${responseText.substring(0, 500)}`;
+        }
+
+        // Așteptăm puțin pentru ca schimbarea să fie procesată
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        console.log("⏳ Verific noul username...");
+        let changed = await getProfile(session_id, device_id, iid);
+        console.log(`Noul username: ${changed}`);
+
+        if (changed === new_username) {
+            return `✔ Username schimbat cu succes!\nDe la: ${lastUsername}\nLa: ${changed}`;
+        } else if (changed !== lastUsername) {
+            return `⚠ Username schimbat, dar diferit de cel cerut.\nVeche: ${lastUsername}\nNou: ${changed}`;
+        } else {
+            return `❌ Username nu s-a schimbat. Răspuns TikTok:\n${responseText.substring(0, 1000)}`;
+        }
+
+    } catch (e) {
+        console.error("Eroare în changeUsername:", e);
+        return `❌ Eroare internă: ${e.message}`;
+    }
 }
 
 // ======================================================
@@ -259,7 +335,7 @@ async function changeUsername(session_id, new_username) {
 // ======================================================
 
 client.on("ready", () => {
-    console.log("🤖 Bot online!");
+    console.log(`🤖 Bot online ca ${client.user.tag}!`);
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -268,22 +344,86 @@ client.on("interactionCreate", async (interaction) => {
     const data = getData();
 
     if (interaction.commandName === "set_session_id") {
-        data.session_id = interaction.options.getString("session");
+        const session = interaction.options.getString("session");
+        
+        if (!session || session.length < 10) {
+            return interaction.reply({ content: "❌ Session ID invalid!", ephemeral: true });
+        }
+        
+        data.session_id = session;
         saveData(data);
-        return interaction.reply("✔ Session ID salvat!");
+        
+        console.log(`Session ID salvat: ${session.substring(0, 10)}...`);
+        return interaction.reply({ content: "✔ Session ID salvat!", ephemeral: true });
+    }
+
+    if (interaction.commandName === "check_session") {
+        if (!data.session_id || data.session_id.trim() === "") {
+            return interaction.reply({ content: "❌ Niciun session ID salvat.", ephemeral: true });
+        }
+        
+        await interaction.deferReply({ ephemeral: true });
+        
+        let device_id = Math.floor(Math.random() * 9999999999).toString();
+        let iid = Math.floor(Math.random() * 9999999999).toString();
+        
+        try {
+            let username = await getProfile(data.session_id, device_id, iid);
+            
+            if (username === "None") {
+                return interaction.editReply("❌ Session ID invalid sau expirat!");
+            }
+            
+            return interaction.editReply(`✔ Session ID valid!\nUsername curent: **${username}**`);
+        } catch (error) {
+            return interaction.editReply(`❌ Eroare la verificare: ${error.message}`);
+        }
     }
 
     if (interaction.commandName === "new_username") {
-        if (!data.session_id)
-            return interaction.reply("❌ Folosește întâi /set_session_id");
+        if (!data.session_id || data.session_id.trim() === "") {
+            return interaction.reply({ 
+                content: "❌ Folosește întâi `/set_session_id` pentru a salva session ID-ul!", 
+                ephemeral: true 
+            });
+        }
 
         const username = interaction.options.getString("username");
+        
+        // Validare username
+        if (!username || username.length < 2 || username.length > 24) {
+            return interaction.reply({ 
+                content: "❌ Username-ul trebuie să aibă între 2 și 24 de caractere!", 
+                ephemeral: true 
+            });
+        }
+        
+        // Trimitem mesajul de "În curs..."
+        await interaction.deferReply();
 
-        await interaction.reply("⏳ Schimb username-ul...");
-
-        let res = await changeUsername(data.session_id, username);
-        return interaction.editReply(res);
+        console.log(`Încep schimbarea username-ului la: ${username}`);
+        
+        let result = await changeUsername(data.session_id, username);
+        
+        console.log(`Rezultat: ${result.substring(0, 100)}...`);
+        
+        return interaction.editReply(result);
     }
 });
 
-client.login(TOKEN);
+// ======================================================
+// ========== ERROR HANDLING ===========================
+// ======================================================
+
+process.on("unhandledRejection", (error) => {
+    console.error("Unhandled promise rejection:", error);
+});
+
+process.on("uncaughtException", (error) => {
+    console.error("Uncaught exception:", error);
+});
+
+client.login(TOKEN).catch(error => {
+    console.error("❌ Eroare la login:", error);
+    process.exit(1);
+});
